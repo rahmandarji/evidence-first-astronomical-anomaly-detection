@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+title: "Evidence-First Astronomical Anomaly Detection"
+message: "If you use this research code or methodology, please cite this repository."
+type: software
+authors:
+  - family-names: Darji
+    given-names: Rahman
+repository-code: "https://github.com/rahmandarji/evidence-first-astronomical-anomaly-detection"
+license: MIT
+keywords:
+  - astronomy
+  - astronomical anomaly detection
+  - NEOWISE
+  - time-domain astronomy
+  - novelty detection
+  - scientific machine learning
+abstract: >
+  Evidence-first, multi-view research framework for prioritizing unusual
+  astronomical sources while separating statistical novelty, evidence
+  quality, systematic risk, and astrophysical interpretation.

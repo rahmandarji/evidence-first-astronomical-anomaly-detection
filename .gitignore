@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local / generated research data
+*.fits
+*.fit
+*.parquet
+
+# Local secrets and credentials
+.env
+*.pem
+*.key
+
+# Local tooling / OS files
+.DS_Store
