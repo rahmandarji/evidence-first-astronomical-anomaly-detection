@@ -1,0 +1,23 @@
+{
+  "title": "Evidence-First Astronomical Anomaly Detection",
+  "version": "1.0.0",
+  "upload_type": "software",
+  "description": "Public research-code and methodology release accompanying the study \"Evidence-First Astronomical Anomaly Investigation.\" The release provides the reproducible implementation, selected research notebooks, validation procedures, methodology documentation, dependency information, and analysis provenance associated with the frozen Paper 1 research state.",
+  "creators": [
+    {
+      "name": "Darji, Rahman"
+    }
+  ],
+  "keywords": [
+    "astronomy",
+    "NEOWISE",
+    "time-domain astronomy",
+    "astronomical anomaly detection",
+    "novelty detection",
+    "scientific machine learning",
+    "evidence-first investigation"
+  ],
+  "license": "MIT",
+  "access_right": "open",
+  "language": "eng"
+}
