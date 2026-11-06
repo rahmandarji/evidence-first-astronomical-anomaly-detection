@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import math
+import re
 import os
 import platform
 from importlib.metadata import PackageNotFoundError, version
@@ -19,6 +21,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pyarrow
+import requests
 from pyarrow import dataset as ds
 from pyarrow.fs import S3FileSystem
 from sklearn.cluster import DBSCAN
@@ -31,6 +34,12 @@ S3_PREFIX = "wise/neowiser/catalogs/p1bs_psd/healpix_k5/year11"
 S3_METADATA = (
     f"{S3_BUCKET}/{S3_PREFIX}/"
     "neowiser-healpix_k5-year11.parquet/_metadata"
+)
+GCVS_VIZIER_URL = (
+    "https://vizier.cds.unistra.fr/viz-bin/asu-tsv"
+    "?-source=B/gcvs/gcvs_cat"
+    "&-out=GCVS,RAJ2000,DEJ2000,VarType"
+    "&-out.max=100000"
 )
 CANDIDATE_EXCLUSION = {
     "ra_deg": 179.936465, "dec_deg": -0.0897475, "radius_arcsec": 5.0
@@ -202,6 +211,29 @@ def prepare_detections(raw: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]
     usable["expanded_quality_available_filters"] = expanded.astype(bool)
     usable["expanded_quality_filter_complete"] = bool(complete_expanded_fields)
 
+    quality_diagnostics: dict[str, Any] = {
+        "original_good_quality_pass": int(usable["original_good_quality"].sum()),
+        "expanded_combined_pass": int(usable["expanded_quality_available_filters"].sum()),
+    }
+    if "qi_fact" in usable.columns:
+        quality_diagnostics["qi_fact_gt0_pass"] = int(
+            (usable["qi_fact"].notna() & (usable["qi_fact"] > 0)).sum()
+        )
+    else:
+        quality_diagnostics["qi_fact_gt0_pass"] = None
+    if "saa_sep" in usable.columns:
+        quality_diagnostics["saa_sep_gt0_pass"] = int(
+            (usable["saa_sep"].notna() & (usable["saa_sep"] > 0)).sum()
+        )
+    else:
+        quality_diagnostics["saa_sep_gt0_pass"] = None
+    if "moon_masked" in usable.columns:
+        quality_diagnostics["moon_masked_00_pass"] = int(
+            usable["moon_masked"].eq("00").sum()
+        )
+    else:
+        quality_diagnostics["moon_masked_00_pass"] = None
+
     exclusion_separation = angular_separation_arcsec(
         CANDIDATE_EXCLUSION["ra_deg"], CANDIDATE_EXCLUSION["dec_deg"],
         usable["ra"].to_numpy(), usable["dec"].to_numpy(),
@@ -230,6 +262,7 @@ def prepare_detections(raw: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]
         ],
         "expanded_quality_filter_complete": bool(complete_expanded_fields),
         "expanded_quality_rules_applied": applied_rules,
+        "quality_filter_diagnostics": quality_diagnostics,
         "candidate_1_excluded_rows": excluded_count,
         "analysis_rows_after_candidate_1_exclusion": int(len(analysis)),
     }
@@ -277,6 +310,7 @@ def _group_metrics(group: pd.DataFrame) -> dict[str, Any]:
         "n_scan_frame_pairs": int(
             group[["scan_id", "frame_num"]].drop_duplicates().shape[0]
         ),
+        "n_distinct_frame_numbers": int(group["frame_num"].nunique()),
         "duplicate_scan_frame_pairs": int(
             group.groupby(["scan_id", "frame_num"], dropna=False).size().gt(1).sum()
         ),
@@ -319,9 +353,21 @@ def _group_metrics(group: pd.DataFrame) -> dict[str, Any]:
         strict["w1mpro"].to_numpy(dtype=float),
         strict["w1sigmpro"].to_numpy(dtype=float),
     )
-    result["expanded_quality_w1_weighted_mean"] = weighted_mean(
+    strict_w1, strict_w1err = _finite_pairs(
         strict["w1mpro"].to_numpy(dtype=float),
         strict["w1sigmpro"].to_numpy(dtype=float),
+    )
+    strict_loo = leave_one_out_chi_square(strict_w1, strict_w1err)
+    result["expanded_quality_w1_weighted_mean"] = weighted_mean(
+        strict_w1, strict_w1err
+    )
+    result["expanded_quality_loo_n_tested"] = int(len(strict_loo))
+    result["expanded_quality_loo_min_w1_reduced_chi2"] = (
+        float(np.nanmin(strict_loo)) if len(strict_loo) else float("nan")
+    )
+    result["expanded_quality_loo_fraction_ge_2"] = (
+        float(np.mean(strict_loo >= CHI2_THRESHOLD))
+        if len(strict_loo) else float("nan")
     )
     return result
 
@@ -389,6 +435,183 @@ def match_candidate(groups: pd.DataFrame, candidate: dict[str, float]) -> dict[s
     return row
 
 
+
+def parse_ra_degrees(value: Any) -> float:
+    """Parse a VizieR RA value in decimal degrees or sexagesimal hours."""
+    try:
+        text = str(value).strip()
+        if not text or text.lower() in {"nan", "none"}:
+            return float("nan")
+        text = re.sub(r"[hH]", ":", text)
+        text = re.sub(r"[mM]", ":", text)
+        text = re.sub(r"[sS]", "", text)
+        text = re.sub(r"\s+", ":", text)
+        text = re.sub(r":+", ":", text).strip(":")
+        parts = text.split(":")
+        if len(parts) == 3:
+            hours, minutes, seconds = map(float, parts)
+            return 15.0 * (hours + minutes / 60.0 + seconds / 3600.0)
+        return float(text)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def parse_dec_degrees(value: Any) -> float:
+    """Parse a VizieR declination value, preserving its leading sign."""
+    try:
+        text = str(value).strip()
+        if not text or text.lower() in {"nan", "none"}:
+            return float("nan")
+        sign = -1.0 if text.startswith("-") else 1.0
+        text = text.lstrip("+-")
+        text = re.sub(r"[dD]", ":", text)
+        text = re.sub(r"[mM]", ":", text)
+        text = re.sub(r"[sS]", "", text)
+        text = re.sub(r"\s+", ":", text)
+        text = re.sub(r":+", ":", text).strip(":")
+        parts = text.split(":")
+        if len(parts) == 3:
+            degrees, minutes, seconds = map(float, parts)
+            return sign * (degrees + minutes / 60.0 + seconds / 3600.0)
+        return sign * abs(float(text))
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def run_gcvs_reference_check(
+    raw_detections: pd.DataFrame,
+    source_groups: pd.DataFrame,
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Cross-match field objects against GCVS as a small positive-control audit.
+
+    This is intentionally not used to tune thresholds or estimate classifier
+    recall. A tiny local reference population cannot support those claims.
+    """
+    reference_path = output_dir / "gcvs_reference_population.csv"
+    matches_path = output_dir / "gcvs_neowise_crossmatch.csv"
+    try:
+        response = requests.get(GCVS_VIZIER_URL, timeout=180)
+        response.raise_for_status()
+        lines = [
+            line for line in response.text.splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        if len(lines) < 2:
+            raise RuntimeError("VizieR returned no parseable GCVS table.")
+        catalogue = pd.read_csv(
+            io.StringIO("\n".join(lines)), sep="\t", dtype=str
+        )
+        catalogue.columns = [str(name).strip() for name in catalogue.columns]
+        required = ["GCVS", "RAJ2000", "DEJ2000", "VarType"]
+        missing = [name for name in required if name not in catalogue.columns]
+        if missing:
+            raise RuntimeError("GCVS response is missing columns: " + ", ".join(missing))
+
+        catalogue["ra_deg"] = catalogue["RAJ2000"].apply(parse_ra_degrees)
+        catalogue["dec_deg"] = catalogue["DEJ2000"].apply(parse_dec_degrees)
+        valid = catalogue[
+            np.isfinite(catalogue["ra_deg"]) & np.isfinite(catalogue["dec_deg"])
+        ].copy()
+        in_field = valid[
+            valid["ra_deg"].between(RA_MIN, RA_MAX)
+            & valid["dec_deg"].between(DEC_MIN, DEC_MAX)
+        ].copy()
+        reference = (
+            in_field[["GCVS", "ra_deg", "dec_deg", "VarType"]]
+            .drop_duplicates("GCVS")
+            .rename(columns={"GCVS": "object_id", "VarType": "variability_type"})
+            .reset_index(drop=True)
+        )
+        write_csv(reference, reference_path)
+
+        raw_ra = pd.to_numeric(raw_detections["ra"], errors="coerce").to_numpy(dtype=float)
+        raw_dec = pd.to_numeric(raw_detections["dec"], errors="coerce").to_numpy(dtype=float)
+        rows = []
+        for _, obj in reference.iterrows():
+            detection_sep = angular_separation_arcsec(
+                float(obj["ra_deg"]), float(obj["dec_deg"]), raw_ra, raw_dec
+            )
+            best_detection_index = int(np.nanargmin(detection_sep))
+            best_detection_sep = float(detection_sep[best_detection_index])
+            detection = raw_detections.iloc[best_detection_index]
+
+            group_sep = angular_separation_arcsec(
+                float(obj["ra_deg"]), float(obj["dec_deg"]),
+                source_groups["ra"].to_numpy(dtype=float),
+                source_groups["dec"].to_numpy(dtype=float),
+            )
+            best_group_index = int(np.nanargmin(group_sep))
+            best_group = source_groups.iloc[best_group_index]
+            best_group_sep = float(group_sep[best_group_index])
+
+            rows.append({
+                "object_id": str(obj["object_id"]),
+                "variability_type": str(obj["variability_type"]),
+                "reference_ra_deg": float(obj["ra_deg"]),
+                "reference_dec_deg": float(obj["dec_deg"]),
+                "nearest_neowise_detection_sep_arcsec": best_detection_sep,
+                "nearest_neowise_detection_match_5arcsec": bool(
+                    best_detection_sep <= 5.0
+                ),
+                "nearest_neowise_mjd": float(detection["mjd"]),
+                "nearest_source_group_key": str(best_group["source_key"]),
+                "nearest_source_group_sep_arcsec": best_group_sep,
+                "source_group_match_5arcsec": bool(best_group_sep <= 5.0),
+                "source_group_n_observations": int(best_group["n_observations"]),
+                "source_group_w1_reduced_chi2": float(best_group["w1_reduced_chi2"]),
+            })
+        matches = pd.DataFrame(rows)
+        write_csv(matches, matches_path)
+        return {
+            "status": "COMPLETED",
+            "catalogue": "General Catalogue of Variable Stars (GCVS)",
+            "service": "VizieR",
+            "catalogue_rows_downloaded": int(len(catalogue)),
+            "valid_coordinate_rows": int(len(valid)),
+            "objects_in_analysis_field": int(len(reference)),
+            "objects_matched_to_neowise_detection": int(
+                matches["nearest_neowise_detection_match_5arcsec"].sum()
+            ) if len(matches) else 0,
+            "objects_matched_to_source_group": int(
+                matches["source_group_match_5arcsec"].sum()
+            ) if len(matches) else 0,
+            "interpretation": (
+                "Small positive-control cross-match only. It is not an independent "
+                "photometric confirmation and is too small to estimate recall, "
+                "precision, or a false-positive rate."
+            ),
+            "reference_file": reference_path.name,
+            "matches_file": matches_path.name,
+        }
+    except Exception as exc:
+        empty_reference = pd.DataFrame(
+            columns=["object_id", "ra_deg", "dec_deg", "variability_type"]
+        )
+        empty_matches = pd.DataFrame(
+            columns=[
+                "object_id", "variability_type", "reference_ra_deg",
+                "reference_dec_deg", "nearest_neowise_detection_sep_arcsec",
+                "nearest_neowise_detection_match_5arcsec",
+            ]
+        )
+        write_csv(empty_reference, reference_path)
+        write_csv(empty_matches, matches_path)
+        return {
+            "status": "UNAVAILABLE",
+            "catalogue": "General Catalogue of Variable Stars (GCVS)",
+            "service": "VizieR",
+            "error_type": type(exc).__name__,
+            "interpretation": (
+                "The optional external catalogue request failed. This does not "
+                "invalidate the NEOWISE reproduction; independent-reference "
+                "validation remains incomplete."
+            ),
+            "reference_file": reference_path.name,
+            "matches_file": matches_path.name,
+        }
+
+
 def write_csv(frame: pd.DataFrame, path: Path) -> None:
     frame.to_csv(path, index=False, float_format="%.12g")
 
@@ -445,6 +668,18 @@ def run(output_dir: Path, write_raw: bool = True) -> dict[str, Any]:
         if observation_frames else pd.DataFrame()
     )
     write_csv(candidate_observations, output_dir / "candidate_detections.csv")
+    quality_rejections = (
+        candidate_observations.loc[
+            ~candidate_observations["expanded_quality_available_filters"]
+        ].copy()
+        if not candidate_observations.empty else pd.DataFrame()
+    )
+    write_csv(
+        quality_rejections,
+        output_dir / "candidate_quality_rejections.csv",
+    )
+
+    gcvs_check = run_gcvs_reference_check(raw, groups, output_dir)
 
     sensitivity_rows = []
     for eps in GROUPING_SENSITIVITY_ARCSEC:
@@ -482,6 +717,7 @@ def run(output_dir: Path, write_raw: bool = True) -> dict[str, Any]:
             "selected_columns": selected_columns,
         },
         "population_counts": counts,
+        "external_reference_check": gcvs_check,
         "baseline_method": {
             "source_grouping": "scikit-learn DBSCAN",
             "eps_arcsec": GROUP_RADIUS_ARCSEC,
