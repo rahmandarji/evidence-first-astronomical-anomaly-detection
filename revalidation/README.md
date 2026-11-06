@@ -74,3 +74,30 @@ astrophysical variability. Expanded quality filters reduce known observational
 risks but cannot eliminate extraction, blending, cadence, calibration, or
 instrumental explanations. Independent confirmation still requires external
 observations or catalogues.
+
+
+## External reference and quality audit
+
+The pipeline performs an optional cross-match with the General Catalogue of
+Variable Stars (GCVS) through VizieR. The catalogue is used only as a small
+positive-control check. The local field is too small to estimate recall,
+precision, or a false-positive rate, and catalogue matching is not a substitute
+for independent time-series photometric confirmation.
+
+The output separately records the number of detections passing each available
+quality field: qi_fact > 0, saa_sep > 0, and moon_masked == 00. It also records
+the rows rejected by the combined expanded filter and recomputes leave-one-out
+statistics on the retained observations.
+
+Additional output files:
+
+- candidate_quality_rejections.csv: candidate observations rejected by the
+  expanded quality rule, with the source metadata needed to inspect the reason.
+- gcvs_reference_population.csv: GCVS objects falling inside the development
+  field; empty when the external service is unavailable.
+- gcvs_neowise_crossmatch.csv: nearest-detection and nearest-source-group
+  matches for those reference objects; empty when the service is unavailable.
+
+The run summary reports the GCVS request status explicitly. An unavailable
+external catalogue service does not invalidate the NEOWISE reproduction, but
+it means the positive-control check was not completed.
