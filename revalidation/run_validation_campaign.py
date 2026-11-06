@@ -201,27 +201,55 @@ def run_gcvs_check(
     catalogue: pd.DataFrame | None = None
     successful_url: str | None = None
 
-    params = {
+    spatial_params = {
         "-source": GCVS_TABLE,
         "-out": "GCVS,RAJ2000,DEJ2000,VarType",
         "-c": "180 0",
         "-c.rs": "12",
         "-out.max": "2000",
     }
+    # Cone syntax varies between VizieR mirrors. If a valid cone query returns
+    # no rows, retrieve the full catalogue (about 60k rows) and spatially filter
+    # it locally, matching the method used in the original EXP-006 notebook.
+    full_params = {
+        "-source": GCVS_TABLE,
+        "-out": "GCVS,RAJ2000,DEJ2000,VarType",
+        "-out.max": "100000",
+    }
+    search_mode = "spatial_cone"
     for endpoint in GCVS_MIRRORS:
         try:
             response = requests.get(
                 endpoint,
-                params=params,
+                params=spatial_params,
                 timeout=(15, 55),
                 headers={"User-Agent": "NEOWISE-revalidation/2.0 research"},
             )
             response.raise_for_status()
             parsed = parse_delimited_response(
                 response.text,
-                sep="\t",
+                sep="\\t",
                 expected_columns=("GCVS", "RAJ2000", "DEJ2000", "VarType"),
             )
+            if parsed.empty:
+                response = requests.get(
+                    endpoint,
+                    params=full_params,
+                    timeout=(15, 90),
+                    headers={"User-Agent": "NEOWISE-revalidation/2.0 research"},
+                )
+                response.raise_for_status()
+                parsed = parse_delimited_response(
+                    response.text,
+                    sep="\\t",
+                    expected_columns=("GCVS", "RAJ2000", "DEJ2000", "VarType"),
+                )
+                search_mode = "full_catalogue_local_spatial_filter"
+            if parsed.empty:
+                errors.append(
+                    f"{urlparse(endpoint).netloc}: spatial and full catalogue queries returned no rows"
+                )
+                continue
             catalogue = parsed
             successful_url = response.url
             break
@@ -328,6 +356,7 @@ def run_gcvs_check(
         "status": "COMPLETED",
         "catalogue": "GCVS 5.1",
         "service": successful_url,
+        "search_mode": search_mode,
         "catalogue_rows_returned": int(len(catalogue)),
         "valid_coordinate_rows": int(len(valid)),
         "objects_inside_development_field": int(len(reference)),
@@ -942,35 +971,62 @@ def run_image_remeasurement(
                         "center": f"{ra_deg:.8f},{dec_deg:.8f}",
                         "size": "101pix",
                     }
-                    try:
-                        response = session.get(
-                            url,
-                            params=params,
-                            timeout=(15, 40),
-                            headers={"User-Agent": "NEOWISE-revalidation/2.0 research"},
-                        )
-                        response.raise_for_status()
-                        if not response.content.startswith((b"SIMPLE", b"\x1f\x8b")):
-                            raise ValueError("Response did not begin with FITS/gzip signature.")
-                        product_payload[product] = response.content
-                        product_urls[product] = response.url
-                        product_status[product] = "DOWNLOADED"
-                        path = images_dir / filename
-                        path.write_bytes(response.content)
-                        manifest_rows.append({
-                            "candidate_id": candidate_id,
-                            "frame_id": frame_id,
-                            "scan_id": scan_id,
-                            "frame_num": frame_number,
-                            "band": band,
-                            "product": product,
-                            "url": response.url,
-                            "file": str(path.relative_to(out_dir)),
-                            "size_bytes": len(response.content),
-                            "sha256": sha256_bytes(response.content),
-                            "status": "DOWNLOADED",
-                        })
-                    except Exception as exc:
+                    last_error: Exception | None = None
+                    # The first campaign received intermittent HTTP 503 responses
+                    # from IRSA IBE. Retry transient 5xx/429/network errors with
+                    # bounded backoff; permanent 4xx and invalid payloads are not retried.
+                    for attempt in range(4):
+                        try:
+                            response = session.get(
+                                url,
+                                params=params,
+                                timeout=(20, 55),
+                                headers={"User-Agent": "NEOWISE-revalidation/2.0 research"},
+                            )
+                            response.raise_for_status()
+                            if not response.content.startswith((b"SIMPLE", b"\\x1f\\x8b")):
+                                raise ValueError(
+                                    "Response did not begin with FITS/gzip signature."
+                                )
+                            product_payload[product] = response.content
+                            product_urls[product] = response.url
+                            product_status[product] = "DOWNLOADED"
+                            path = images_dir / filename
+                            path.write_bytes(response.content)
+                            manifest_rows.append({
+                                "candidate_id": candidate_id,
+                                "frame_id": frame_id,
+                                "scan_id": scan_id,
+                                "frame_num": frame_number,
+                                "band": band,
+                                "product": product,
+                                "url": response.url,
+                                "file": str(path.relative_to(out_dir)),
+                                "size_bytes": len(response.content),
+                                "sha256": sha256_bytes(response.content),
+                                "status": "DOWNLOADED",
+                                "attempts": attempt + 1,
+                            })
+                            last_error = None
+                            break
+                        except Exception as exc:
+                            last_error = exc
+                            status_code = getattr(
+                                getattr(exc, "response", None), "status_code", None
+                            )
+                            retryable = (
+                                status_code in {429, 500, 502, 503, 504}
+                                or isinstance(
+                                    exc,
+                                    (requests.Timeout, requests.ConnectionError),
+                                )
+                            )
+                            if retryable and attempt < 3:
+                                time.sleep((1.5, 3.0, 6.0)[attempt])
+                                continue
+                            break
+                    if product not in product_payload:
+                        exc = last_error or RuntimeError("Unknown image download failure")
                         product_status[product] = f"ERROR:{type(exc).__name__}"
                         fetch_errors.append(
                             f"{candidate_id} {frame_id} W{band} {product}: "
