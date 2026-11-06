@@ -136,8 +136,20 @@ def _package_version(package: str) -> str:
         return "not-installed"
 
 
-def retrieve_region() -> tuple[pd.DataFrame, list[str]]:
-    """Retrieve the EXP-005 rectangle from the public IRSA S3 Parquet archive."""
+def retrieve_region(
+    bounds: tuple[float, float, float, float] = (RA_MIN, RA_MAX, DEC_MIN, DEC_MAX),
+) -> tuple[pd.DataFrame, list[str]]:
+    """Retrieve a rectangular field from the public IRSA S3 Parquet archive.
+
+    Bounds are (ra_min, ra_max, dec_min, dec_max), in degrees. The default
+    preserves the original EXP-005 development field exactly.
+    """
+    ra_min, ra_max, dec_min, dec_max = map(float, bounds)
+    if not (0.0 <= ra_min < ra_max <= 360.0):
+        raise ValueError("RA bounds must satisfy 0 <= min < max <= 360 degrees.")
+    if not (-90.0 <= dec_min < dec_max <= 90.0):
+        raise ValueError("Dec bounds must satisfy -90 <= min < max <= 90 degrees.")
+
     filesystem = S3FileSystem(region="us-west-2", anonymous=True)
     dataset = ds.parquet_dataset(
         S3_METADATA, filesystem=filesystem, partitioning="hive"
@@ -153,21 +165,25 @@ def retrieve_region() -> tuple[pd.DataFrame, list[str]]:
         if name in available and name not in REQUIRED_COLUMNS
     ]
     region_filter = (
-        (ds.field("ra") >= RA_MIN)
-        & (ds.field("ra") <= RA_MAX)
-        & (ds.field("dec") >= DEC_MIN)
-        & (ds.field("dec") <= DEC_MAX)
+        (ds.field("ra") >= ra_min)
+        & (ds.field("ra") <= ra_max)
+        & (ds.field("dec") >= dec_min)
+        & (ds.field("dec") <= dec_max)
     )
     table = dataset.scanner(
         filter=region_filter, columns=columns, use_threads=True
     ).to_table()
     frame = table.to_pandas()
     if frame.empty:
-        raise RuntimeError("IRSA returned zero rows for the documented field.")
+        raise RuntimeError(
+            f"IRSA returned zero rows for bounds {(ra_min, ra_max, dec_min, dec_max)}."
+        )
     return frame, columns
 
 
-def prepare_detections(raw: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+def prepare_detections(
+    raw: pd.DataFrame, *, exclude_candidate_1: bool = True
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Apply historical numeric, quality and Candidate #1 exclusion rules."""
     frame = raw.copy()
     numeric = [
@@ -238,7 +254,11 @@ def prepare_detections(raw: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]
         CANDIDATE_EXCLUSION["ra_deg"], CANDIDATE_EXCLUSION["dec_deg"],
         usable["ra"].to_numpy(), usable["dec"].to_numpy(),
     )
-    exclusion_mask = exclusion_separation <= CANDIDATE_EXCLUSION["radius_arcsec"]
+    usable["candidate1_sep_arcsec"] = exclusion_separation
+    exclusion_mask = (
+        exclusion_separation <= CANDIDATE_EXCLUSION["radius_arcsec"]
+        if exclude_candidate_1 else np.zeros(len(usable), dtype=bool)
+    )
     excluded_count = int(exclusion_mask.sum())
     analysis = usable.loc[~exclusion_mask].copy().reset_index(drop=True)
 
