@@ -984,7 +984,7 @@ def run_image_remeasurement(
                                 headers={"User-Agent": "NEOWISE-revalidation/2.0 research"},
                             )
                             response.raise_for_status()
-                            if not response.content.startswith((b"SIMPLE", b"\\x1f\\x8b")):
+                            if not response.content.startswith((b"SIMPLE", b"\x1f\x8b")):
                                 raise ValueError(
                                     "Response did not begin with FITS/gzip signature."
                                 )
