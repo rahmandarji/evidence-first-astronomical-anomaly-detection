@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: neowise-revalidation-${ github.event.pull_request.number || github.ref }}
+  group: neowise-revalidation-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -59,7 +59,7 @@ jobs:
       - name: Upload reproducibility artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: neowise-revalidation-${ github.sha }}
+          name: neowise-revalidation-${{ github.sha }}
           path: artifacts/neowise-revalidation/
           if-no-files-found: error
           retention-days: 14
