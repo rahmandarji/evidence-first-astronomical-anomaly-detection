@@ -401,6 +401,21 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _json_safe(value: Any) -> Any:
+    """Convert NumPy/pandas scalars and non-finite floats to strict JSON values."""
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if value is pd.NA:
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 def run(output_dir: Path, write_raw: bool = True) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     raw, selected_columns = retrieve_region()
@@ -502,7 +517,7 @@ def run(output_dir: Path, write_raw: bool = True) -> dict[str, Any]:
     }
     summary_path = output_dir / "run_summary.json"
     summary_path.write_text(
-        json.dumps(summary, indent=2, allow_nan=False), encoding="utf-8"
+        json.dumps(_json_safe(summary), indent=2, allow_nan=False), encoding="utf-8"
     )
 
     artifacts = sorted(
