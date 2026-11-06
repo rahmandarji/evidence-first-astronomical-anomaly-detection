@@ -1,0 +1,65 @@
+name: NEOWISE reproducible revalidation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "revalidation/**"
+      - ".github/workflows/neowise-revalidation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neowise-revalidation-${ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: revalidation/requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r revalidation/requirements.txt
+      - name: Run numerical and pipeline tests
+        run: python -m pytest -q revalidation/tests
+
+  public-data-revalidation:
+    name: Retrieve public NEOWISE data and revalidate candidates
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: revalidation/requirements.txt
+      - name: Install pinned research dependencies
+        run: python -m pip install -r revalidation/requirements.txt
+      - name: Retrieve IRSA NEOWISE field and run revalidation
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python revalidation/reproduce_neowise.py \
+            --output-dir artifacts/neowise-revalidation
+      - name: Upload reproducibility artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: neowise-revalidation-${ github.sha }}
+          path: artifacts/neowise-revalidation/
+          if-no-files-found: error
+          retention-days: 14
