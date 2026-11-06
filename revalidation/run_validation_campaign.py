@@ -265,11 +265,19 @@ def run_gcvs_check(
             "matches_file": matches_path.name,
         }
 
-    catalogue["ra_deg"] = catalogue["RAJ2000"].apply(parse_ra_degrees)
-    catalogue["dec_deg"] = catalogue["DEJ2000"].apply(parse_dec_degrees)
-    valid = catalogue[
-        np.isfinite(catalogue["ra_deg"]) & np.isfinite(catalogue["dec_deg"])
-    ].copy()
+    # Force numeric dtypes explicitly: pandas can preserve object dtype when
+    # the VizieR response contains masked coordinate cells or mixed tokens.
+    catalogue["ra_deg"] = pd.to_numeric(
+        catalogue["RAJ2000"].apply(parse_ra_degrees), errors="coerce"
+    ).astype("float64")
+    catalogue["dec_deg"] = pd.to_numeric(
+        catalogue["DEJ2000"].apply(parse_dec_degrees), errors="coerce"
+    ).astype("float64")
+    valid_coordinate_mask = (
+        np.isfinite(catalogue["ra_deg"].to_numpy(dtype=np.float64))
+        & np.isfinite(catalogue["dec_deg"].to_numpy(dtype=np.float64))
+    )
+    valid = catalogue.loc[valid_coordinate_mask].copy()
     in_field = valid[
         valid["ra_deg"].between(RA_MIN, RA_MAX)
         & valid["dec_deg"].between(DEC_MIN, DEC_MAX)
@@ -1288,28 +1296,74 @@ def run_heldout_field(out_dir: Path) -> dict[str, Any]:
     return summary
 
 
+def _run_track_safely(
+    track_name: str,
+    function: Any,
+    *args: Any,
+) -> dict[str, Any]:
+    """Keep a single external-service/analysis failure from suppressing other tracks."""
+    try:
+        return function(*args)
+    except Exception as exc:
+        return {
+            "status": "FAILED",
+            "track": track_name,
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:2000],
+            "interpretation": (
+                "This track did not complete. Its result must not be inferred "
+                "from empty output files or from the success of other tracks."
+            ),
+        }
+
+
 def run(input_dir: Path, output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     candidate_detections = pd.read_csv(input_dir / "candidate_detections.csv")
     baseline_groups = pd.read_csv(input_dir / "source_groups_eps1p5.csv")
     analysis_detections = pd.read_parquet(input_dir / "analysis_detections.parquet")
 
-    # Positive-control catalogue matching uses the fresh revalidation population.
-    # The legacy GCVS positive-control result remains separately documented if
-    # all catalogue mirrors are unreachable.
-    gcvs = run_gcvs_check(
-        analysis_detections, baseline_groups, output_dir
+    # Each of the five tracks is isolated. A failure in one remote catalogue
+    # or archive endpoint must not prevent the remaining scientific checks.
+    gcvs = _run_track_safely(
+        "GCVS positive control",
+        run_gcvs_check,
+        analysis_detections, baseline_groups, output_dir,
     )
-    gaia = run_gaia_check(candidate_detections, output_dir)
-    ztf = run_ztf_check(output_dir)
-    images = run_image_remeasurement(candidate_detections, output_dir)
-    injections = run_injection_recovery(analysis_detections, output_dir)
-    heldout = run_heldout_field(output_dir)
+    gaia = _run_track_safely(
+        "Gaia DR3 cross-match", run_gaia_check,
+        candidate_detections, output_dir,
+    )
+    ztf = _run_track_safely(
+        "ZTF cross-match", run_ztf_check, output_dir,
+    )
+    images = _run_track_safely(
+        "NEOWISE single-exposure image remeasurement",
+        run_image_remeasurement,
+        candidate_detections, output_dir,
+    )
+    injections = _run_track_safely(
+        "Synthetic injection and null experiments",
+        run_injection_recovery,
+        analysis_detections, output_dir,
+    )
+    heldout = _run_track_safely(
+        "Spatial held-out field", run_heldout_field, output_dir,
+    )
 
+    track_values = [gcvs, gaia, ztf, images, injections, heldout]
+    failed_tracks = [
+        item.get("track", item.get("status", "UNKNOWN"))
+        for item in track_values if item.get("status") in {"FAILED", "UNAVAILABLE", "PARTIAL_OR_UNAVAILABLE"}
+    ]
     summary = {
         "project": "Evidence-First Astronomical Anomaly Detection",
         "experiment": "VALIDATION-CAMPAIGN-1-TO-5",
-        "status": "COMPLETED_WITH_DOCUMENTED_LIMITATIONS",
+        "status": (
+            "COMPLETED_WITH_DOCUMENTED_LIMITATIONS"
+            if not failed_tracks else "COMPLETED_WITH_TRACK_FAILURES"
+        ),
+        "failed_or_partial_tracks": failed_tracks,
         "campaign_tracks": {
             "1_gcvs_positive_control": gcvs,
             "2_gaia_and_ztf_external_crossmatches": {
@@ -1329,6 +1383,7 @@ def run(input_dir: Path, output_dir: Path) -> dict[str, Any]:
             "Injection recovery depends on the chosen amplitudes, periods, phase sampling, and cadence.",
             "The held-out sky field uses the same NEOWISE instrument and data release.",
             "No threshold was tuned using the held-out field.",
+            "Failed or unavailable tracks are not interpreted as null scientific results.",
         ],
     }
     write_json(summary, output_dir / "validation_campaign_summary.json")
