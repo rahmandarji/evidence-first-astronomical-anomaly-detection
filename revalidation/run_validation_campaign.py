@@ -33,23 +33,42 @@ import requests
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from reproduce_neowise import (
-    CANDIDATES,
-    DEC_MAX,
-    DEC_MIN,
-    GROUP_RADIUS_ARCSEC,
-    MIN_OBSERVATIONS,
-    RA_MAX,
-    RA_MIN,
-    angular_separation_arcsec,
-    build_groups,
-    parse_dec_degrees,
-    parse_ra_degrees,
-    prepare_detections,
-    reduced_chi_square,
-    retrieve_region,
-    weighted_mean,
-)
+try:
+    from .reproduce_neowise import (
+        CANDIDATES,
+        DEC_MAX,
+        DEC_MIN,
+        GROUP_RADIUS_ARCSEC,
+        MIN_OBSERVATIONS,
+        RA_MAX,
+        RA_MIN,
+        angular_separation_arcsec,
+        build_groups,
+        parse_dec_degrees,
+        parse_ra_degrees,
+        prepare_detections,
+        reduced_chi_square,
+        retrieve_region,
+        weighted_mean,
+    )
+except ImportError:  # Direct execution as "python revalidation/run_validation_campaign.py"
+    from reproduce_neowise import (
+        CANDIDATES,
+        DEC_MAX,
+        DEC_MIN,
+        GROUP_RADIUS_ARCSEC,
+        MIN_OBSERVATIONS,
+        RA_MAX,
+        RA_MIN,
+        angular_separation_arcsec,
+        build_groups,
+        parse_dec_degrees,
+        parse_ra_degrees,
+        prepare_detections,
+        reduced_chi_square,
+        retrieve_region,
+        weighted_mean,
+    )
 
 GCVS_TABLE = "B/gcvs/gcvs_cat"
 GCVS_MIRRORS = (
