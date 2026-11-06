@@ -699,7 +699,14 @@ def run(output_dir: Path, write_raw: bool = True) -> dict[str, Any]:
         output_dir / "candidate_quality_rejections.csv",
     )
 
-    gcvs_check = run_gcvs_reference_check(raw, groups, output_dir)
+    # GCVS is handled once in the separate validation campaign using
+    # region-focused VizieR mirror queries. Avoid a duplicate full-catalogue
+    # request in the baseline extraction step.
+    gcvs_check = {
+        "status": "DEFERRED_TO_VALIDATION_CAMPAIGN",
+        "catalogue": "GCVS 5.1",
+        "note": "See validation_campaign_summary.json and GCVS result files.",
+    }
 
     sensitivity_rows = []
     for eps in GROUPING_SENSITIVITY_ARCSEC:
