@@ -11,6 +11,8 @@ from revalidation.reproduce_neowise import (
     build_groups,
     leave_one_out_chi_square,
     prepare_detections,
+    parse_dec_degrees,
+    parse_ra_degrees,
     reduced_chi_square,
     weighted_mean,
 )
@@ -116,3 +118,19 @@ def test_coordinate_candidate_matching_survives_group_label_changes():
             groups["ra"].to_numpy(), groups["dec"].to_numpy(),
         )
         assert float(np.min(separation)) < 1.0
+
+
+def test_parse_ra_sexagesimal_hours():
+    assert parse_ra_degrees("12 00 00.0") == pytest.approx(180.0)
+
+
+def test_parse_ra_decimal_degrees():
+    assert parse_ra_degrees("180.25") == pytest.approx(180.25)
+
+
+def test_parse_negative_sexagesimal_declination():
+    assert parse_dec_degrees("-00 05 24.0") == pytest.approx(-0.09)
+
+
+def test_parse_negative_decimal_declination_preserves_sign():
+    assert parse_dec_degrees("-0.09") == pytest.approx(-0.09)
