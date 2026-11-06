@@ -38,7 +38,7 @@ jobs:
     name: Retrieve public NEOWISE data and revalidate candidates
     needs: unit-tests
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -56,10 +56,19 @@ jobs:
         run: |
           python revalidation/reproduce_neowise.py \
             --output-dir artifacts/neowise-revalidation
+      - name: Run independent validation campaign tracks 1-5
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python revalidation/run_validation_campaign.py \
+            --input-dir artifacts/neowise-revalidation \
+            --output-dir artifacts/validation-campaign
       - name: Upload reproducibility artifacts
         uses: actions/upload-artifact@v4
         with:
           name: neowise-revalidation-${{ github.sha }}
-          path: artifacts/neowise-revalidation/
+          path: |
+            artifacts/neowise-revalidation/
+            artifacts/validation-campaign/
           if-no-files-found: error
           retention-days: 14
